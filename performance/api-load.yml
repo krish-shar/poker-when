@@ -1,0 +1,474 @@
+# Artillery.js API load testing configuration
+config:
+  target: 'http://localhost:3000'
+  phases:
+    # Warm-up phase
+    - duration: 30
+      arrivalRate: 5
+      name: "API Warm-up"
+    
+    # Normal load
+    - duration: 60
+      arrivalRate: 20
+      name: "Normal load - 20 req/sec"
+    
+    # Increased load
+    - duration: 60
+      arrivalRate: 20
+      rampTo: 50
+      name: "Ramp up to 50 req/sec"
+    
+    # Peak load
+    - duration: 120
+      arrivalRate: 50
+      name: "Peak load - 50 req/sec"
+    
+    # Spike test
+    - duration: 30
+      arrivalRate: 100
+      name: "Spike test - 100 req/sec"
+    
+    # Stress test
+    - duration: 60
+      arrivalRate: 150
+      name: "Stress test - 150 req/sec"
+    
+    # Cool down
+    - duration: 30
+      arrivalRate: 10
+      name: "Cool down"
+
+  # Performance thresholds
+  ensure:
+    # 95th percentile response time should be under 100ms for most endpoints
+    - http.response_time.p95: 200
+    
+    # 99th percentile should be under 500ms
+    - http.response_time.p99: 500
+    
+    # Error rate should be less than 1%
+    - http.codes.200: 0.99
+    - http.codes.400: 0.005
+    - http.codes.500: 0.005
+    
+    # Requests per second should handle target load
+    - http.request_rate: 50
+
+  # HTTP specific configuration
+  http:
+    # Connection timeout
+    timeout: 10
+    
+    # Connection pooling
+    pool: 10
+    
+    # Request timeout
+    requestTimeout: 5000
+    
+    # Response timeout
+    responseTimeout: 10000
+    
+    # Max sockets per host
+    maxSockets: 10
+
+  # Load test configuration
+  processor: "./performance/api-processor.js"
+  
+  # Metrics plugins
+  plugins:
+    metrics-by-endpoint:
+      useOnlyRequestNames: true
+      metricsNamespace: "poker_api"
+    
+    # Custom metrics
+    expect:
+      outputFormat: 'json'
+      expectationsFile: './performance/api-expectations.json'
+
+# Test scenarios
+scenarios:
+  # Health check endpoint testing
+  - name: "Health Check Load"
+    weight: 5
+    flow:
+      - get:
+          url: "/api/health"
+          name: "Health Check"
+          expect:
+            - statusCode: 200
+            - hasProperty: "status"
+            - equals:
+                - "{{ status }}"
+                - "healthy"
+          capture:
+            - json: "$.timestamp"
+              as: "healthTimestamp"
+            - json: "$.uptime"
+              as: "uptime"
+
+  # Authentication endpoint testing
+  - name: "Authentication Load"
+    weight: 20
+    flow:
+      # User registration
+      - post:
+          url: "/api/auth/register"
+          name: "User Registration"
+          json:
+            email: "loadtest{{ $randomNumber }}@example.com"
+            username: "loaduser{{ $randomNumber }}"
+            password: "LoadTest123!@#"
+            displayName: "Load Test User {{ $randomNumber }}"
+          expect:
+            - statusCode: [201, 409] # 201 success, 409 if user exists
+          capture:
+            - json: "$.token"
+              as: "authToken"
+            - json: "$.user.id"
+              as: "userId"
+      
+      - think: 1
+      
+      # User login (with existing credentials)
+      - post:
+          url: "/api/auth/login"
+          name: "User Login"
+          json:
+            email: "loadtest{{ $randomNumber }}@example.com"
+            password: "LoadTest123!@#"
+          expect:
+            - statusCode: [200, 401] # 200 success, 401 if invalid
+          capture:
+            - json: "$.token"
+              as: "authToken"
+      
+      - think: 2
+      
+      # Token validation
+      - post:
+          url: "/api/auth/validate"
+          name: "Token Validation"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          expect:
+            - statusCode: [200, 401]
+
+  # User profile operations
+  - name: "User Profile Operations"
+    weight: 15
+    flow:
+      # First authenticate
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "testuser@example.com"
+            password: "TestPassword123!"
+          capture:
+            - json: "$.token"
+              as: "authToken"
+            - json: "$.user.id"
+              as: "userId"
+      
+      # Get user profile
+      - get:
+          url: "/api/users/{{ userId }}/profile"
+          name: "Get User Profile"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          expect:
+            - statusCode: 200
+            - hasProperty: "profile"
+          capture:
+            - json: "$.profile.displayName"
+              as: "displayName"
+      
+      - think: 1
+      
+      # Update user profile
+      - patch:
+          url: "/api/users/{{ userId }}/profile"
+          name: "Update User Profile"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+            Content-Type: "application/json"
+          json:
+            displayName: "Updated Name {{ $randomNumber }}"
+            bio: "Load test bio updated at {{ $isoTimestamp }}"
+            preferences:
+              theme: "dark"
+              soundEnabled: true
+          expect:
+            - statusCode: 200
+
+  # Game management endpoints
+  - name: "Game Management Load"
+    weight: 25
+    flow:
+      # Authenticate
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "gamehost@example.com"
+            password: "TestPassword123!"
+          capture:
+            - json: "$.token"
+              as: "authToken"
+            - json: "$.user.id"
+              as: "userId"
+      
+      # Create a game
+      - post:
+          url: "/api/games"
+          name: "Create Game"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+            Content-Type: "application/json"
+          json:
+            name: "Load Test Game {{ $randomNumber }}"
+            gameType: "texas_holdem"
+            settings:
+              smallBlind: 1.00
+              bigBlind: 2.00
+              maxPlayers: 6
+              buyInMin: 100
+              buyInMax: 500
+              allowRebuys: true
+              timeBank: 30
+          expect:
+            - statusCode: 201
+          capture:
+            - json: "$.game.id"
+              as: "gameId"
+      
+      - think: 2
+      
+      # Get game details
+      - get:
+          url: "/api/games/{{ gameId }}"
+          name: "Get Game Details"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          expect:
+            - statusCode: 200
+            - hasProperty: "game"
+      
+      # Join the game
+      - post:
+          url: "/api/games/{{ gameId }}/join"
+          name: "Join Game"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+            Content-Type: "application/json"
+          json:
+            seatNumber: 1
+            buyInAmount: 200
+          expect:
+            - statusCode: [200, 400] # 200 success, 400 if seat taken
+      
+      - think: 5
+      
+      # Leave the game
+      - post:
+          url: "/api/games/{{ gameId }}/leave"
+          name: "Leave Game"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          expect:
+            - statusCode: 200
+
+  # Admin operations (heavier load)
+  - name: "Admin Operations Load"
+    weight: 10
+    flow:
+      # Admin login
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "admin@example.com"
+            password: "AdminPassword123!"
+          capture:
+            - json: "$.token"
+              as: "adminToken"
+      
+      # Get admin dashboard
+      - get:
+          url: "/api/admin/dashboard"
+          name: "Admin Dashboard"
+          headers:
+            Authorization: "Bearer {{ adminToken }}"
+          expect:
+            - statusCode: [200, 403] # 200 if admin, 403 if not
+          capture:
+            - json: "$.metrics.totalUsers"
+              as: "totalUsers"
+            - json: "$.metrics.activeGames"
+              as: "activeGames"
+      
+      # Get user list
+      - get:
+          url: "/api/admin/users"
+          name: "Admin User List"
+          headers:
+            Authorization: "Bearer {{ adminToken }}"
+          qs:
+            page: 1
+            limit: 20
+          expect:
+            - statusCode: [200, 403]
+      
+      # Get game list
+      - get:
+          url: "/api/admin/games"
+          name: "Admin Game List"
+          headers:
+            Authorization: "Bearer {{ adminToken }}"
+          qs:
+            page: 1
+            limit: 20
+            status: "active"
+          expect:
+            - statusCode: [200, 403]
+
+  # Database intensive operations
+  - name: "Statistics and Analytics"
+    weight: 15
+    flow:
+      # Login
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "player@example.com"
+            password: "TestPassword123!"
+          capture:
+            - json: "$.token"
+              as: "authToken"
+            - json: "$.user.id"
+              as: "userId"
+      
+      # Get user statistics
+      - get:
+          url: "/api/users/{{ userId }}/statistics"
+          name: "User Statistics"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          qs:
+            period: "monthly"
+            includeDetails: true
+          expect:
+            - statusCode: 200
+      
+      # Get game history
+      - get:
+          url: "/api/users/{{ userId }}/games/history"
+          name: "Game History"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          qs:
+            page: 1
+            limit: 50
+            sortBy: "createdAt"
+            sortOrder: "desc"
+          expect:
+            - statusCode: 200
+      
+      # Get hand history
+      - get:
+          url: "/api/users/{{ userId }}/hands/history"
+          name: "Hand History"
+          headers:
+            Authorization: "Bearer {{ authToken }}"
+          qs:
+            page: 1
+            limit: 100
+            gameType: "texas_holdem"
+          expect:
+            - statusCode: 200
+
+  # Error handling and edge cases
+  - name: "Error Scenarios"
+    weight: 10
+    flow:
+      # Test 404 endpoints
+      - get:
+          url: "/api/nonexistent"
+          name: "404 Test"
+          expect:
+            - statusCode: 404
+      
+      # Test invalid JSON
+      - post:
+          url: "/api/auth/login"
+          name: "Invalid JSON Test"
+          headers:
+            Content-Type: "application/json"
+          body: "invalid-json{"
+          expect:
+            - statusCode: 400
+      
+      # Test unauthorized access
+      - get:
+          url: "/api/admin/dashboard"
+          name: "Unauthorized Access Test"
+          expect:
+            - statusCode: 401
+      
+      # Test invalid authentication
+      - get:
+          url: "/api/users/123/profile"
+          name: "Invalid Auth Test"
+          headers:
+            Authorization: "Bearer invalid-token"
+          expect:
+            - statusCode: 401
+      
+      # Test rate limiting
+      - loop:
+          - post:
+              url: "/api/auth/login"
+              name: "Rate Limit Test"
+              json:
+                email: "ratelimit@example.com"
+                password: "wrong-password"
+              expect:
+                - statusCode: [401, 429] # 401 invalid, 429 rate limited
+        count: 10
+
+# Before/After hooks
+before:
+  flow:
+    # Setup test data
+    - log: "Setting up load test environment"
+    
+    # Create test users if they don't exist
+    - post:
+        url: "/api/auth/register"
+        json:
+          email: "testuser@example.com"
+          username: "testuser"
+          password: "TestPassword123!"
+          displayName: "Test User"
+    
+    - post:
+        url: "/api/auth/register"
+        json:
+          email: "gamehost@example.com"
+          username: "gamehost"
+          password: "TestPassword123!"
+          displayName: "Game Host"
+    
+    - post:
+        url: "/api/auth/register"
+        json:
+          email: "player@example.com"
+          username: "player"
+          password: "TestPassword123!"
+          displayName: "Player"
+
+after:
+  flow:
+    - log: "Load test completed"
+    
+    # Get final health check
+    - get:
+        url: "/api/health"
+        name: "Final Health Check"

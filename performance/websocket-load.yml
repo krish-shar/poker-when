@@ -1,0 +1,378 @@
+# Artillery.js performance test configuration for WebSocket load testing
+config:
+  target: 'ws://localhost:8080'
+  phases:
+    # Warm-up phase
+    - duration: 30
+      arrivalRate: 5
+      name: "Warm-up"
+    
+    # Gradual ramp-up
+    - duration: 60
+      arrivalRate: 10
+      rampTo: 50
+      name: "Ramp-up to 50 concurrent users"
+    
+    # Sustained load
+    - duration: 120
+      arrivalRate: 50
+      name: "Sustained load - 50 users/sec"
+    
+    # Peak load test
+    - duration: 60
+      arrivalRate: 50
+      rampTo: 100
+      name: "Peak load - 100 users/sec"
+    
+    # Spike test
+    - duration: 30
+      arrivalRate: 200
+      name: "Spike test"
+    
+    # Cool down
+    - duration: 60
+      arrivalRate: 10
+      name: "Cool down"
+
+  # Performance thresholds
+  ensure:
+    # WebSocket connection success rate should be > 95%
+    - websocket.connection_rate: 0.95
+    
+    # Message response time p95 should be < 100ms
+    - websocket.message_latency.p95: 100
+    
+    # Error rate should be < 5%
+    - websocket.error_rate: 0.05
+    
+    # Connection establishment time should be < 500ms
+    - websocket.connection_time.p95: 500
+
+  # WebSocket specific configuration
+  ws:
+    # Max concurrent connections per virtual user
+    maxConnections: 1
+    
+    # Connection timeout
+    timeout: 10000
+    
+    # Heartbeat interval (ping/pong)
+    heartbeatInterval: 30000
+
+  # Load test configuration
+  processor: "./performance/websocket-processor.js"
+  
+  # Metrics and reporting
+  plugins:
+    metrics-by-endpoint:
+      useOnlyRequestNames: true
+    
+    # Custom metrics for poker-specific events
+    expect:
+      outputFormat: 'json'
+      expectationsFile: './performance/expectations.json'
+
+# Test scenarios
+scenarios:
+  # Basic connection and authentication test
+  - name: "WebSocket Connection Test"
+    weight: 20
+    engine: ws
+    flow:
+      - connect:
+          url: "/"
+          headers:
+            "Origin": "http://localhost:3000"
+      
+      # Authenticate user
+      - send: |
+          {
+            "type": "authenticate",
+            "payload": {
+              "token": "{{ generateTestToken() }}"
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "auth_success"
+              timeout: 5000
+      
+      # Keep connection alive
+      - loop:
+          - send: |
+              {
+                "type": "ping",
+                "timestamp": "{{ $isoTimestamp }}",
+                "messageId": "{{ $uuid }}"
+              }
+          - wait:
+              - receive:
+                  match:
+                    json: "$.type"
+                    value: "pong"
+                  timeout: 1000
+          - think: 5
+        count: 10
+
+  # Game room joining and leaving
+  - name: "Game Room Management"
+    weight: 25
+    engine: ws
+    flow:
+      - connect:
+          url: "/"
+          headers:
+            "Origin": "http://localhost:3000"
+      
+      - send: |
+          {
+            "type": "authenticate",
+            "payload": {
+              "token": "{{ generateTestToken() }}"
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "auth_success"
+      
+      # Join a game room
+      - send: |
+          {
+            "type": "join_room",
+            "payload": {
+              "gameId": "{{ generateTestGameId() }}",
+              "seatNumber": {{ randomSeatNumber() }}
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "room_joined"
+              timeout: 2000
+      
+      # Stay in room for a while
+      - think: 30
+      
+      # Leave the room
+      - send: |
+          {
+            "type": "leave_room",
+            "payload": {
+              "gameId": "{{ gameId }}"
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "room_left"
+
+  # Chat message testing
+  - name: "Chat Message Load"
+    weight: 15
+    engine: ws
+    flow:
+      - connect:
+          url: "/"
+      
+      - send: |
+          {
+            "type": "authenticate",
+            "payload": {
+              "token": "{{ generateTestToken() }}"
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "auth_success"
+      
+      - send: |
+          {
+            "type": "join_room",
+            "payload": {
+              "gameId": "{{ generateTestGameId() }}"
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "room_joined"
+      
+      # Send multiple chat messages
+      - loop:
+          - send: |
+              {
+                "type": "chat_message",
+                "payload": {
+                  "text": "{{ generateChatMessage() }}",
+                  "gameId": "{{ gameId }}"
+                },
+                "timestamp": "{{ $isoTimestamp }}",
+                "messageId": "{{ $uuid }}"
+              }
+          - think: 2
+        count: 5
+
+  # Game action simulation
+  - name: "Poker Game Actions"
+    weight: 30
+    engine: ws
+    flow:
+      - connect:
+          url: "/"
+      
+      - send: |
+          {
+            "type": "authenticate",
+            "payload": {
+              "token": "{{ generateTestToken() }}"
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "auth_success"
+      
+      - send: |
+          {
+            "type": "join_room",
+            "payload": {
+              "gameId": "{{ generateTestGameId() }}",
+              "seatNumber": {{ randomSeatNumber() }}
+            },
+            "timestamp": "{{ $isoTimestamp }}",
+            "messageId": "{{ $uuid }}"
+          }
+      
+      - wait:
+          - receive:
+              match:
+                json: "$.type"
+                value: "room_joined"
+      
+      # Simulate poker actions
+      - loop:
+          - function: "randomPokerAction"
+          - send: |
+              {
+                "type": "game_action",
+                "payload": {
+                  "action": "{{ action }}",
+                  "amount": {{ amount }},
+                  "gameId": "{{ gameId }}"
+                },
+                "timestamp": "{{ $isoTimestamp }}",
+                "messageId": "{{ $uuid }}"
+              }
+          - wait:
+              - receive:
+                  timeout: 3000
+          - think: 1
+        count: 20
+
+  # Stress test - rapid reconnections
+  - name: "Connection Stress Test"
+    weight: 10
+    engine: ws
+    flow:
+      - loop:
+          - connect:
+              url: "/"
+          - send: |
+              {
+                "type": "authenticate",
+                "payload": {
+                  "token": "{{ generateTestToken() }}"
+                },
+                "timestamp": "{{ $isoTimestamp }}",
+                "messageId": "{{ $uuid }}"
+              }
+          - wait:
+              - receive:
+                  timeout: 2000
+          - think: 1
+          - disconnect
+          - think: 1
+        count: 10
+
+# Custom functions for test data generation
+functions:
+  generateTestToken: |
+    function() {
+      return 'test-token-' + Math.random().toString(36).substring(7);
+    }
+  
+  generateTestGameId: |
+    function() {
+      const gameIds = [
+        'game-1', 'game-2', 'game-3', 'game-4', 'game-5'
+      ];
+      return gameIds[Math.floor(Math.random() * gameIds.length)];
+    }
+  
+  randomSeatNumber: |
+    function() {
+      return Math.floor(Math.random() * 6) + 1;
+    }
+  
+  generateChatMessage: |
+    function() {
+      const messages = [
+        'Good luck everyone!',
+        'Nice hand!',
+        'Well played',
+        'Thanks for the game',
+        'Let\\'s go!',
+        'Great fold',
+        'Tough beat',
+        'Nice call',
+        'Good game',
+        'See you next time'
+      ];
+      return messages[Math.floor(Math.random() * messages.length)];
+    }
+  
+  randomPokerAction: |
+    function(context) {
+      const actions = [
+        { action: 'fold', amount: 0 },
+        { action: 'check', amount: 0 },
+        { action: 'call', amount: Math.floor(Math.random() * 50) + 10 },
+        { action: 'raise', amount: Math.floor(Math.random() * 100) + 20 },
+        { action: 'all_in', amount: Math.floor(Math.random() * 500) + 100 }
+      ];
+      
+      const selectedAction = actions[Math.floor(Math.random() * actions.length)];
+      context.vars.action = selectedAction.action;
+      context.vars.amount = selectedAction.amount;
+    }
