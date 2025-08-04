@@ -280,7 +280,10 @@ function validatePlayerAction(
         return { valid: false, error: 'Raise amount required' };
       }
       
-      const minRaise = Math.max(currentBet * 2, currentBet + (currentBet - playerCurrentBet));
+      // Minimum raise = current bet + the size of the last raise (or big blind if no raise yet)
+      const lastRaiseSize = Math.max(currentBet, 2); // Assume big blind is 2
+      const minRaise = currentBet + lastRaiseSize;
+      
       if (amount < minRaise) {
         return { valid: false, error: `Minimum raise is ${minRaise}` };
       }
@@ -308,7 +311,7 @@ async function checkBettingRoundComplete(sessionId: string): Promise<boolean> {
       .from('session_players')
       .select('current_bet, has_folded, status')
       .eq('session_id', sessionId)
-      .eq('status', 'active');
+      .in('status', ['active', 'all_in']);
 
     if (error || !players) {
       return false;
@@ -319,9 +322,16 @@ async function checkBettingRoundComplete(sessionId: string): Promise<boolean> {
       return true;
     }
 
-    // Check if all active players have the same bet
-    const currentBets = activePlayers.map(p => p.current_bet || 0);
-    return currentBets.every(bet => bet === currentBets[0]);
+    // Find the highest bet among active players
+    const maxBet = Math.max(...activePlayers.map(p => p.current_bet || 0));
+    
+    // Check if all active players have either:
+    // 1. Matched the highest bet, OR
+    // 2. Are all-in with less chips
+    return activePlayers.every(p => {
+      const playerBet = p.current_bet || 0;
+      return playerBet === maxBet || p.status === 'all_in';
+    });
 
   } catch (error) {
     console.error('Error checking betting round:', error);
@@ -526,8 +536,19 @@ async function evaluateShowdown(players: any[], communityCards: any[]): Promise<
     if (a.ranking.rank !== b.ranking.rank) {
       return b.ranking.rank - a.ranking.rank;
     }
-    // If same rank, compare kickers (simplified)
-    return 0;
+    
+    // If same rank, compare kickers
+    if (a.ranking.kickers && b.ranking.kickers) {
+      for (let i = 0; i < Math.min(a.ranking.kickers.length, b.ranking.kickers.length); i++) {
+        const aKickerValue = CardUtils.getRankValue(a.ranking.kickers[i] as any);
+        const bKickerValue = CardUtils.getRankValue(b.ranking.kickers[i] as any);
+        if (aKickerValue !== bKickerValue) {
+          return bKickerValue - aKickerValue;
+        }
+      }
+    }
+    
+    return 0; // Exact tie
   });
 
   // Find all players with the best hand

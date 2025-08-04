@@ -93,42 +93,65 @@ export class HandEvaluator {
     const rankCounts = this.getRankCounts(sortedCards)
     const counts = Object.values(rankCounts).sort((a, b) => b - a)
 
+    // Get kickers for tie-breaking - sort by count first, then by rank value
+    const ranksGrouped = Object.entries(rankCounts)
+      .sort(([rankA, countA], [rankB, countB]) => {
+        if (countA !== countB) return countB - countA;
+        return CardUtils.getRankValue(rankB) - CardUtils.getRankValue(rankA);
+      })
+      .map(([rank]) => rank);
+
     if (isStraight && isFlush) {
       if (sortedCards[0].rank === 'A' && sortedCards[1].rank === 'K') {
-        return { rank: 9, name: 'Royal Flush', cards: sortedCards }
+        return { rank: 9, name: 'Royal Flush', cards: sortedCards, kickers: [] }
       }
-      return { rank: 8, name: 'Straight Flush', cards: sortedCards }
+      return { rank: 8, name: 'Straight Flush', cards: sortedCards, kickers: [sortedCards[0].rank] }
     }
 
     if (counts[0] === 4) {
-      return { rank: 7, name: 'Four of a Kind', cards: sortedCards }
+      const quadRank = ranksGrouped[0];
+      const kicker = ranksGrouped[1];
+      return { rank: 7, name: 'Four of a Kind', cards: sortedCards, kickers: [quadRank, kicker] }
     }
 
     if (counts[0] === 3 && counts[1] === 2) {
-      return { rank: 6, name: 'Full House', cards: sortedCards }
+      const tripRank = ranksGrouped[0];
+      const pairRank = ranksGrouped[1];
+      return { rank: 6, name: 'Full House', cards: sortedCards, kickers: [tripRank, pairRank] }
     }
 
     if (isFlush) {
-      return { rank: 5, name: 'Flush', cards: sortedCards }
+      const kickers = sortedCards.map(c => c.rank).slice(0, 5);
+      return { rank: 5, name: 'Flush', cards: sortedCards, kickers }
     }
 
     if (isStraight) {
-      return { rank: 4, name: 'Straight', cards: sortedCards }
+      // For wheel straight (A-2-3-4-5), the "high" card is actually 5
+      const highCard = (sortedCards[0].rank === 'A' && sortedCards[1].rank === '5') ? '5' : sortedCards[0].rank;
+      return { rank: 4, name: 'Straight', cards: sortedCards, kickers: [highCard] }
     }
 
     if (counts[0] === 3) {
-      return { rank: 3, name: 'Three of a Kind', cards: sortedCards }
+      const tripRank = ranksGrouped[0];
+      const kickers = ranksGrouped.slice(1, 3);
+      return { rank: 3, name: 'Three of a Kind', cards: sortedCards, kickers: [tripRank, ...kickers] }
     }
 
     if (counts[0] === 2 && counts[1] === 2) {
-      return { rank: 2, name: 'Two Pair', cards: sortedCards }
+      const highPair = ranksGrouped[0];
+      const lowPair = ranksGrouped[1];
+      const kicker = ranksGrouped[2];
+      return { rank: 2, name: 'Two Pair', cards: sortedCards, kickers: [highPair, lowPair, kicker] }
     }
 
     if (counts[0] === 2) {
-      return { rank: 1, name: 'One Pair', cards: sortedCards }
+      const pairRank = ranksGrouped[0];
+      const kickers = ranksGrouped.slice(1, 4);
+      return { rank: 1, name: 'One Pair', cards: sortedCards, kickers: [pairRank, ...kickers] }
     }
 
-    return { rank: 0, name: 'High Card', cards: sortedCards }
+    const kickers = sortedCards.map(c => c.rank).slice(0, 5);
+    return { rank: 0, name: 'High Card', cards: sortedCards, kickers }
   }
 
   private static isFlush(cards: Card[]): boolean {
@@ -165,6 +188,7 @@ export interface HandRanking {
   rank: number
   name: string
   cards: Card[]
+  kickers?: string[]
 }
 
 // Game engine
