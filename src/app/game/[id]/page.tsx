@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { supabase } from "@/lib/supabase/client";
+import { PokerRealtimeClient, GameEvent, ChatMessage } from "@/lib/realtime/poker-client";
 import { 
   Users, 
   MessageCircle, 
@@ -75,7 +76,7 @@ export default function PokerGamePage() {
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
 
-  const wsRef = useRef<WebSocket | null>(null);
+  const realtimeClientRef = useRef<PokerRealtimeClient | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -85,12 +86,12 @@ export default function PokerGamePage() {
   useEffect(() => {
     if (user && gameId) {
       initializeGame();
-      connectWebSocket();
+      connectRealtime();
     }
     
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
+      if (realtimeClientRef.current) {
+        realtimeClientRef.current.disconnect();
       }
     };
   }, [user, gameId]);
@@ -203,112 +204,160 @@ export default function PokerGamePage() {
     }
   };
 
-  const connectWebSocket = () => {
+  const connectRealtime = async () => {
     try {
-      // Connect to WebSocket server
-      const wsUrl = `ws://localhost:8080?sessionId=${gameId}&userId=${user.id}`;
-      const ws = new WebSocket(wsUrl);
+      const client = new PokerRealtimeClient(
+        gameId,
+        user.id,
+        handleGameEvent,
+        handleChatMessage,
+        handleRealtimeError
+      );
 
-      ws.onopen = () => {
-        console.log('WebSocket connected');
-        setConnected(true);
-        
-        // Join the game session
-        ws.send(JSON.stringify({
-          type: 'join_session',
-          sessionId: gameId,
-          userId: user.id
-        }));
-      };
+      await client.connect();
+      setConnected(true);
+      
+      // Load initial game state and chat history
+      const gameState = await client.getGameState();
+      if (gameState) {
+        updateGameStateFromRealtime(gameState);
+      }
 
-      ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        handleWebSocketMessage(message);
-      };
+      const chatHistory = await client.getChatHistory();
+      setChatMessages(chatHistory.map(msg => ({
+        id: msg.id,
+        user: msg.username,
+        message: msg.message,
+        timestamp: msg.created_at,
+        type: msg.message_type as 'game' | 'chat'
+      })));
 
-      ws.onclose = () => {
-        console.log('WebSocket disconnected');
-        setConnected(false);
-        
-        // Try to reconnect after 3 seconds
-        setTimeout(() => {
-          if (user && gameId) {
-            connectWebSocket();
-          }
-        }, 3000);
-      };
-
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setConnected(false);
-      };
-
-      wsRef.current = ws;
+      realtimeClientRef.current = client;
     } catch (error) {
-      console.error('WebSocket connection error:', error);
+      console.error('Realtime connection error:', error);
       setError('Failed to connect to game server');
+      setConnected(false);
     }
   };
 
-  const handleWebSocketMessage = (message: any) => {
-    console.log('Received WebSocket message:', message);
+  const handleGameEvent = (event: GameEvent) => {
+    console.log('Received game event:', event);
 
-    switch (message.type) {
-      case 'session_joined':
-        addChatMessage('System', 'Connected to game', 'game');
-        break;
-      
-      case 'player_joined':
-        addChatMessage('System', `${message.player.username || 'Player'} joined the game`, 'game');
-        break;
-      
-      case 'new_hand_started':
-        updateGameState({
-          pot: message.pot,
-          currentBet: message.currentBet,
-          gameStage: 'preflop',
-          communityCards: []
-        });
-        addChatMessage('System', 'New hand started', 'game');
-        break;
-      
-      case 'hole_cards':
-        if (myPlayer) {
-          setMyPlayer({
-            ...myPlayer,
-            holeCards: message.cards
-          });
-        }
+    switch (event.type) {
+      case 'game_state_update':
+        updateGameStateFromRealtime(event.payload);
         break;
       
       case 'player_action':
-        updateGameState({
-          pot: message.gameState.pot,
-          currentBet: message.gameState.currentBet
-        });
-        addChatMessage('System', `Player ${message.action}ed`, 'game');
+        addChatMessage('System', `Player ${event.payload.action_type}${event.payload.amount ? ` $${event.payload.amount}` : ''}`, 'game');
         break;
       
-      case 'game_state_update':
-        updateGameState({
-          gameStage: message.gameState,
-          communityCards: message.communityCards,
-          pot: message.pot
-        });
+      case 'player_joined':
+        addChatMessage('System', 'Player joined the game', 'game');
         break;
       
-      case 'chat_message':
-        addChatMessage(message.user, message.message, 'chat');
+      case 'player_left':
+        addChatMessage('System', 'Player left the game', 'game');
         break;
       
-      case 'error':
-        setError(message.message);
+      case 'hand_started':
+        addChatMessage('System', 'New hand started', 'game');
         break;
     }
+  };
+
+  const handleChatMessage = (message: ChatMessage) => {
+    setChatMessages(prev => [...prev, {
+      id: message.id,
+      user: message.username,
+      message: message.message,
+      timestamp: message.created_at,
+      type: message.message_type as 'game' | 'chat'
+    }]);
+  };
+
+  const handleRealtimeError = (error: string) => {
+    setError(error);
+    setConnected(false);
   };
 
   const updateGameState = (updates: Partial<GameState>) => {
     setGameState(prev => prev ? { ...prev, ...updates } : null);
+  };
+
+  const updateGameStateFromRealtime = async (realtimeData: any) => {
+    try {
+      // Fetch fresh data to get complete state including players
+      const { data: session, error } = await supabase
+        .from('poker_sessions')
+        .select(`
+          *,
+          session_players (
+            id,
+            user_id,
+            seat_number,
+            current_chips,
+            status,
+            current_bet,
+            has_folded,
+            hole_cards,
+            users (username)
+          )
+        `)
+        .eq('id', gameId)
+        .single();
+
+      if (error || !session) {
+        console.error('Error fetching updated game state:', error);
+        return;
+      }
+
+      // Update game state
+      const players: Player[] = session.session_players?.map((p: any) => ({
+        id: p.user_id,
+        username: p.users?.username || 'Anonymous',
+        chips: p.current_chips,
+        seatNumber: p.seat_number,
+        currentBet: p.current_bet || 0,
+        folded: p.has_folded || false,
+        isDealer: p.seat_number === (session.dealer_position || 0),
+        isTurn: false, // Will be calculated
+        status: p.status,
+        holeCards: p.user_id === user?.id ? p.hole_cards : undefined
+      })) || [];
+
+      // Determine whose turn it is
+      const activePlayers = players.filter(p => !p.folded && p.status === 'active');
+      const currentPlayerIndex = session.current_player_index || 0;
+      if (currentPlayerIndex < activePlayers.length) {
+        const currentPlayerId = activePlayers[currentPlayerIndex]?.id;
+        players.forEach(p => {
+          p.isTurn = p.id === currentPlayerId;
+        });
+      }
+
+      setGameState({
+        id: session.id,
+        status: session.status,
+        pot: session.total_pot || 0,
+        currentBet: session.current_bet || 0,
+        communityCards: session.community_cards || [],
+        players,
+        currentPlayerIndex: session.current_player_index || 0,
+        gameStage: session.game_stage || 'preflop',
+        smallBlind: session.game_config?.small_blind || 1,
+        bigBlind: session.game_config?.big_blind || 2
+      });
+
+      // Update my player data
+      const myUpdatedPlayer = players.find(p => p.id === user?.id);
+      if (myUpdatedPlayer) {
+        setMyPlayer(myUpdatedPlayer);
+      }
+
+    } catch (error) {
+      console.error('Error updating game state from realtime:', error);
+    }
   };
 
   const addChatMessage = (user: string, message: string, type: 'game' | 'chat') => {
@@ -321,29 +370,17 @@ export default function PokerGamePage() {
     }]);
   };
 
-  const sendChatMessage = () => {
-    if (!chatInput.trim() || !wsRef.current) return;
+  const sendChatMessage = async () => {
+    if (!chatInput.trim() || !realtimeClientRef.current) return;
 
-    wsRef.current.send(JSON.stringify({
-      type: 'chat_message',
-      sessionId: gameId,
-      userId: user.id,
-      message: chatInput.trim()
-    }));
-
+    await realtimeClientRef.current.sendChatMessage(chatInput.trim());
     setChatInput("");
   };
 
-  const makeAction = (action: string, amount?: number) => {
-    if (!wsRef.current || !myPlayer) return;
+  const makeAction = async (action: string, amount?: number) => {
+    if (!realtimeClientRef.current || !myPlayer) return;
 
-    wsRef.current.send(JSON.stringify({
-      type: 'player_action',
-      sessionId: gameId,
-      userId: user.id,
-      action,
-      amount
-    }));
+    await realtimeClientRef.current.makeAction(action, amount);
   };
 
   const scrollToBottom = () => {
