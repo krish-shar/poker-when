@@ -93,17 +93,13 @@ async function startNewHand(sessionId: string, players: any[]) {
     // Create a fresh deck
     const deck = createAndShuffleDeck();
     
-    // Deal hole cards (2 cards per player)
+    // Deal hole cards properly (2 cards per player, dealing one at a time around the table)
+    const holeCardsByIndex = dealHoleCards(deck, players.length);
     const playerHoleCards: { [key: string]: any[] } = {};
     
-    // First card to each player
-    for (const player of players) {
-      playerHoleCards[player.user_id] = [deck.pop()];
-    }
-    
-    // Second card to each player
-    for (const player of players) {
-      playerHoleCards[player.user_id].push(deck.pop());
+    // Map hole cards to player user_ids
+    for (let i = 0; i < players.length; i++) {
+      playerHoleCards[players[i].user_id] = holeCardsByIndex[i];
     }
 
     // Determine blinds (simple rotation)
@@ -222,4 +218,24 @@ function createAndShuffleDeck() {
   }
 
   return deck;
+}
+
+function dealHoleCards(deck: any[], playerCount: number) {
+  const holeCards: { [key: number]: any[] } = {};
+  
+  // Initialize arrays for each player
+  for (let i = 0; i < playerCount; i++) {
+    holeCards[i] = [];
+  }
+  
+  // Deal 2 cards to each player (one at a time)
+  for (let round = 0; round < 2; round++) {
+    for (let player = 0; player < playerCount; player++) {
+      if (deck.length > 0) {
+        holeCards[player].push(deck.pop());
+      }
+    }
+  }
+  
+  return holeCards;
 }

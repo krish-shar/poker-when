@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { PokerGameEngine, HandEvaluator, CardUtils } from '@/lib/game/engine';
 
 // Server-side Supabase client
 const supabaseServer = createClient(
@@ -121,44 +122,62 @@ async function processPlayerAction(
     let updates: any = {};
     let playerUpdates: any = {};
     const currentBet = session.current_bet || 0;
+    const playerCurrentBet = player.current_bet || 0;
     let newPot = session.total_pot || 0;
+
+    // Validate action and amount
+    const validation = validatePlayerAction(action, amount, currentBet, playerCurrentBet, player.current_chips);
+    if (!validation.valid) {
+      return { success: false, error: validation.error };
+    }
 
     switch (action) {
       case 'fold':
         playerUpdates.has_folded = true;
+        playerUpdates.status = 'folded';
         break;
 
       case 'check':
-        if (currentBet > (player.current_bet || 0)) {
-          return { success: false, error: 'Cannot check when there is a bet to call' };
-        }
+        // No chips movement for check
         break;
 
       case 'call':
-        const callAmount = currentBet - (player.current_bet || 0);
-        if (callAmount > player.current_chips) {
-          return { success: false, error: 'Not enough chips to call' };
-        }
-        
-        playerUpdates.current_bet = currentBet;
+        const callAmount = Math.min(currentBet - playerCurrentBet, player.current_chips);
+        playerUpdates.current_bet = playerCurrentBet + callAmount;
         playerUpdates.current_chips = player.current_chips - callAmount;
         newPot += callAmount;
+        
+        // Check if player is all-in
+        if (playerUpdates.current_chips === 0) {
+          playerUpdates.status = 'all_in';
+        }
         break;
 
       case 'raise':
-        if (!amount || amount < currentBet * 2) {
-          return { success: false, error: 'Invalid raise amount' };
-        }
+        const raiseAmount = amount!;
+        const totalToPay = raiseAmount - playerCurrentBet;
         
-        if (amount > player.current_chips + (player.current_bet || 0)) {
-          return { success: false, error: 'Not enough chips to raise' };
+        if (totalToPay >= player.current_chips) {
+          // All-in scenario
+          playerUpdates.current_bet = playerCurrentBet + player.current_chips;
+          playerUpdates.current_chips = 0;
+          playerUpdates.status = 'all_in';
+          newPot += player.current_chips;
+          updates.current_bet = Math.max(currentBet, playerUpdates.current_bet);
+        } else {
+          playerUpdates.current_bet = raiseAmount;
+          playerUpdates.current_chips = player.current_chips - totalToPay;
+          newPot += totalToPay;
+          updates.current_bet = raiseAmount;
         }
+        break;
 
-        const totalRaise = amount - (player.current_bet || 0);
-        playerUpdates.current_bet = amount;
-        playerUpdates.current_chips = player.current_chips - totalRaise;
-        newPot += totalRaise;
-        updates.current_bet = amount;
+      case 'all_in':
+        playerUpdates.current_bet = playerCurrentBet + player.current_chips;
+        playerUpdates.current_chips = 0;
+        playerUpdates.status = 'all_in';
+        newPot += player.current_chips;
+        updates.current_bet = Math.max(currentBet, playerUpdates.current_bet);
         break;
 
       default:
@@ -226,6 +245,60 @@ async function processPlayerAction(
   } catch (error) {
     console.error('Error processing player action:', error);
     return { success: false, error: 'Failed to process action' };
+  }
+}
+
+function validatePlayerAction(
+  action: string,
+  amount: number | undefined,
+  currentBet: number,
+  playerCurrentBet: number,
+  playerChips: number
+): { valid: boolean; error?: string } {
+  switch (action) {
+    case 'fold':
+      return { valid: true };
+
+    case 'check':
+      if (currentBet > playerCurrentBet) {
+        return { valid: false, error: 'Cannot check when there is a bet to call' };
+      }
+      return { valid: true };
+
+    case 'call':
+      const callAmount = currentBet - playerCurrentBet;
+      if (callAmount <= 0) {
+        return { valid: false, error: 'No bet to call' };
+      }
+      if (callAmount > playerChips) {
+        return { valid: false, error: 'Not enough chips to call' };
+      }
+      return { valid: true };
+
+    case 'raise':
+      if (!amount) {
+        return { valid: false, error: 'Raise amount required' };
+      }
+      
+      const minRaise = Math.max(currentBet * 2, currentBet + (currentBet - playerCurrentBet));
+      if (amount < minRaise) {
+        return { valid: false, error: `Minimum raise is ${minRaise}` };
+      }
+      
+      const totalToPay = amount - playerCurrentBet;
+      if (totalToPay > playerChips) {
+        return { valid: false, error: 'Not enough chips to raise' };
+      }
+      return { valid: true };
+
+    case 'all_in':
+      if (playerChips <= 0) {
+        return { valid: false, error: 'No chips to go all-in' };
+      }
+      return { valid: true };
+
+    default:
+      return { valid: false, error: 'Invalid action type' };
   }
 }
 
@@ -343,31 +416,223 @@ function generateCommunityCards(count: number) {
 }
 
 async function handleShowdown(sessionId: string) {
-  // Implement showdown logic
-  // For now, just start a new hand after 5 seconds
-  setTimeout(async () => {
-    // Reset for new hand
-    const { error } = await supabaseServer
+  try {
+    // Get session with all player data
+    const { data: session, error } = await supabaseServer
+      .from('poker_sessions')
+      .select(`
+        *,
+        session_players (
+          id,
+          user_id,
+          current_chips,
+          current_bet,
+          has_folded,
+          status,
+          hole_cards,
+          users (username)
+        )
+      `)
+      .eq('id', sessionId)
+      .single();
+
+    if (error || !session) {
+      console.error('Error getting session for showdown:', error);
+      return;
+    }
+
+    // Find active players who haven't folded
+    const activePlayers = session.session_players?.filter(
+      (p: any) => !p.has_folded && (p.status === 'active' || p.status === 'all_in')
+    ) || [];
+
+    if (activePlayers.length <= 1) {
+      // Only one player left, they win
+      const winner = activePlayers[0];
+      if (winner) {
+        await distributePot(sessionId, [winner], session.total_pot || 0);
+      }
+    } else {
+      // Multiple players - evaluate hands
+      const winners = await evaluateShowdown(activePlayers, session.community_cards || []);
+      await distributePot(sessionId, winners, session.total_pot || 0);
+    }
+
+    // Add showdown message to chat
+    await supabaseServer
+      .from('chat_messages')
+      .insert({
+        session_id: sessionId,
+        user_id: 'system',
+        message: `Hand complete. Starting new hand in 5 seconds...`,
+        message_type: 'system'
+      });
+
+    // Start new hand after delay
+    setTimeout(async () => {
+      await startNewHand(sessionId);
+    }, 5000);
+
+  } catch (error) {
+    console.error('Error in showdown:', error);
+    // Fallback - just start new hand
+    setTimeout(async () => {
+      await startNewHand(sessionId);
+    }, 5000);
+  }
+}
+
+async function evaluateShowdown(players: any[], communityCards: any[]): Promise<any[]> {
+  const playerHands = [];
+
+  for (const player of players) {
+    if (!player.hole_cards || player.hole_cards.length !== 2) {
+      console.error(`Player ${player.user_id} has invalid hole cards`);
+      continue;
+    }
+
+    try {
+      // Combine hole cards and community cards
+      const allCards = [...player.hole_cards, ...communityCards];
+      
+      // Convert to proper Card format if needed
+      const cards = allCards.map(card => ({
+        suit: card.suit,
+        rank: card.rank === '10' ? 'T' : card.rank
+      }));
+
+      // Evaluate hand
+      const handRanking = HandEvaluator.evaluateHand(cards);
+      
+      playerHands.push({
+        player,
+        ranking: handRanking,
+        handDescription: `${handRanking.name} (${handRanking.cards.map(c => `${c.rank}${c.suit[0]}`).join(' ')})`
+      });
+
+    } catch (error) {
+      console.error(`Error evaluating hand for player ${player.user_id}:`, error);
+      // Give them high card ace as fallback
+      playerHands.push({
+        player,
+        ranking: { rank: 0, name: 'High Card', cards: [] },
+        handDescription: 'High Card (evaluation error)'
+      });
+    }
+  }
+
+  // Sort by hand strength (highest first)
+  playerHands.sort((a, b) => {
+    if (a.ranking.rank !== b.ranking.rank) {
+      return b.ranking.rank - a.ranking.rank;
+    }
+    // If same rank, compare kickers (simplified)
+    return 0;
+  });
+
+  // Find all players with the best hand
+  const bestRank = playerHands[0].ranking.rank;
+  const winners = playerHands
+    .filter(ph => ph.ranking.rank === bestRank)
+    .map(ph => ph.player);
+
+  // Log showdown results
+  console.log('Showdown results:');
+  for (const ph of playerHands) {
+    console.log(`${ph.player.users?.username}: ${ph.handDescription}`);
+  }
+
+  return winners;
+}
+
+async function distributePot(sessionId: string, winners: any[], totalPot: number) {
+  if (winners.length === 0 || totalPot <= 0) return;
+
+  const potPerWinner = Math.floor(totalPot / winners.length);
+  const remainder = totalPot % winners.length;
+
+  for (let i = 0; i < winners.length; i++) {
+    const winner = winners[i];
+    const winAmount = potPerWinner + (i === 0 ? remainder : 0);
+
+    // Update winner's chips
+    await supabaseServer
+      .from('session_players')
+      .update({
+        current_chips: winner.current_chips + winAmount
+      })
+      .eq('session_id', sessionId)
+      .eq('user_id', winner.user_id);
+
+    // Add winner message to chat
+    await supabaseServer
+      .from('chat_messages')
+      .insert({
+        session_id: sessionId,
+        user_id: 'system',
+        message: `${winner.users?.username || 'Player'} wins $${winAmount}!`,
+        message_type: 'system'
+      });
+  }
+}
+
+async function startNewHand(sessionId: string) {
+  try {
+    // Reset session for new hand
+    const { error: sessionError } = await supabaseServer
       .from('poker_sessions')
       .update({
         game_stage: 'preflop',
         community_cards: [],
         current_bet: 0,
         total_pot: 0,
-        current_player_index: 0
+        current_player_index: 0,
+        last_action: {
+          player_id: 'system',
+          action: 'new_hand',
+          timestamp: new Date().toISOString()
+        }
       })
       .eq('id', sessionId);
 
-    if (!error) {
-      // Reset all players
-      await supabaseServer
-        .from('session_players')
-        .update({
-          current_bet: 0,
-          has_folded: false,
-          hole_cards: null
-        })
-        .eq('session_id', sessionId);
+    if (sessionError) {
+      console.error('Error resetting session:', sessionError);
+      return;
     }
-  }, 5000);
+
+    // Reset all players
+    const { error: playersError } = await supabaseServer
+      .from('session_players')
+      .update({
+        current_bet: 0,
+        has_folded: false,
+        hole_cards: null,
+        status: 'active'
+      })
+      .eq('session_id', sessionId)
+      .neq('status', 'sitting_out');
+
+    if (playersError) {
+      console.error('Error resetting players:', playersError);
+      return;
+    }
+
+    // Start the new hand via the start-hand endpoint
+    const response = await fetch(`/api/games/${sessionId}/start-hand`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'system'
+      }),
+    });
+
+    if (!response.ok) {
+      console.error('Error starting new hand');
+    }
+
+  } catch (error) {
+    console.error('Error in startNewHand:', error);
+  }
 }

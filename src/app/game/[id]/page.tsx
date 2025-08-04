@@ -550,47 +550,139 @@ export default function PokerGamePage() {
         </div>
 
         {/* Action Buttons */}
-        {myPlayer && gameState?.status === 'playing' && (
+        {myPlayer && gameState?.status === 'playing' && myPlayer.isTurn && !myPlayer.folded && (
           <div className="mt-6 flex justify-center">
-            <div className="bg-gray-800 rounded-lg p-4 flex items-center gap-4">
-              <Button
-                onClick={() => makeAction('fold')}
-                variant="destructive"
-                disabled={myPlayer.folded}
-              >
-                Fold
-              </Button>
-              <Button
-                onClick={() => makeAction('check')}
-                variant="outline"
-                className="border-white/20 text-white hover:bg-white/10"
-                disabled={gameState.currentBet > myPlayer.currentBet}
-              >
-                {gameState.currentBet > myPlayer.currentBet ? 'Call' : 'Check'}
-              </Button>
-              <Button
-                onClick={() => makeAction('call')}
-                className="bg-green-600 hover:bg-green-700"
-                disabled={gameState.currentBet <= myPlayer.currentBet}
-              >
-                Call ${gameState.currentBet - myPlayer.currentBet}
-              </Button>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  min={gameState.currentBet + gameState.bigBlind}
-                  max={myPlayer.chips}
-                  value={betAmount || gameState.currentBet + gameState.bigBlind}
-                  onChange={(e) => setBetAmount(parseInt(e.target.value))}
-                  className="w-24 bg-gray-700 border-gray-600 text-white"
-                />
-                <Button
-                  onClick={() => makeAction('raise', betAmount)}
-                  className="bg-red-600 hover:bg-red-700"
-                >
-                  Raise
-                </Button>
+            <div className="bg-gray-800 rounded-lg p-4">
+              <div className="flex flex-col gap-4">
+                {/* Player info */}
+                <div className="text-center text-white">
+                  <div className="text-sm text-gray-300">Your turn • ${myPlayer.chips} chips</div>
+                  <div className="text-xs text-gray-400">
+                    Pot: ${gameState.pot} • To call: ${Math.max(0, gameState.currentBet - myPlayer.currentBet)}
+                  </div>
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex items-center gap-3">
+                  {/* Fold */}
+                  <Button
+                    onClick={() => makeAction('fold')}
+                    variant="destructive"
+                    size="sm"
+                  >
+                    Fold
+                  </Button>
+
+                  {/* Check/Call */}
+                  {gameState.currentBet <= myPlayer.currentBet ? (
+                    <Button
+                      onClick={() => makeAction('check')}
+                      variant="outline"
+                      className="border-white/20 text-white hover:bg-white/10"
+                      size="sm"
+                    >
+                      Check
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => makeAction('call')}
+                      className="bg-green-600 hover:bg-green-700"
+                      size="sm"
+                      disabled={gameState.currentBet - myPlayer.currentBet > myPlayer.chips}
+                    >
+                      Call ${Math.min(gameState.currentBet - myPlayer.currentBet, myPlayer.chips)}
+                    </Button>
+                  )}
+
+                  {/* Raise */}
+                  {myPlayer.chips > gameState.currentBet - myPlayer.currentBet && (
+                    <div className="flex items-center gap-2">
+                      <div className="flex flex-col gap-1">
+                        <Input
+                          type="number"
+                          min={Math.max(gameState.currentBet * 2, gameState.currentBet + gameState.bigBlind)}
+                          max={myPlayer.chips + myPlayer.currentBet}
+                          value={betAmount || Math.max(gameState.currentBet * 2, gameState.currentBet + gameState.bigBlind)}
+                          onChange={(e) => setBetAmount(parseInt(e.target.value))}
+                          className="w-20 h-8 text-xs bg-gray-700 border-gray-600 text-white"
+                        />
+                        <div className="text-xs text-gray-400 text-center">
+                          ${Math.max(gameState.currentBet * 2, gameState.currentBet + gameState.bigBlind)}-${myPlayer.chips + myPlayer.currentBet}
+                        </div>
+                      </div>
+                      <Button
+                        onClick={() => makeAction('raise', betAmount)}
+                        className="bg-red-600 hover:bg-red-700"
+                        size="sm"
+                        disabled={!betAmount || betAmount < Math.max(gameState.currentBet * 2, gameState.currentBet + gameState.bigBlind)}
+                      >
+                        Raise
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* All-in */}
+                  {myPlayer.chips > 0 && (
+                    <Button
+                      onClick={() => makeAction('all_in')}
+                      className="bg-purple-600 hover:bg-purple-700"
+                      size="sm"
+                    >
+                      All-in (${myPlayer.chips})
+                    </Button>
+                  )}
+                </div>
+
+                {/* Quick bet buttons */}
+                <div className="flex gap-2 justify-center">
+                  <Button
+                    onClick={() => setBetAmount(Math.floor(gameState.pot / 2))}
+                    variant="outline"
+                    size="xs"
+                    className="text-xs border-gray-600 text-gray-300 hover:bg-gray-700"
+                  >
+                    1/2 Pot
+                  </Button>
+                  <Button
+                    onClick={() => setBetAmount(gameState.pot)}
+                    variant="outline"
+                    size="xs"
+                    className="text-xs border-gray-600 text-gray-300 hover:bg-gray-700"
+                  >
+                    Pot
+                  </Button>
+                  <Button
+                    onClick={() => setBetAmount(myPlayer.chips + myPlayer.currentBet)}
+                    variant="outline"
+                    size="xs"
+                    className="text-xs border-gray-600 text-gray-300 hover:bg-gray-700"
+                  >
+                    All-in
+                  </Button>
+                </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Waiting message when not your turn */}
+        {myPlayer && gameState?.status === 'playing' && !myPlayer.isTurn && !myPlayer.folded && (
+          <div className="mt-6 flex justify-center">
+            <div className="bg-gray-800 rounded-lg p-4 text-center">
+              <div className="text-white">Waiting for other players...</div>
+              <div className="text-sm text-gray-400 mt-1">
+                Pot: ${gameState.pot} • Your chips: ${myPlayer.chips}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Folded message */}
+        {myPlayer && myPlayer.folded && (
+          <div className="mt-6 flex justify-center">
+            <div className="bg-gray-800 rounded-lg p-4 text-center">
+              <div className="text-red-400">You have folded</div>
+              <div className="text-sm text-gray-400 mt-1">Waiting for hand to complete...</div>
             </div>
           </div>
         )}
